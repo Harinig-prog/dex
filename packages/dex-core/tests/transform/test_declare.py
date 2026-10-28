@@ -661,3 +661,43 @@ def test_a_supplied_declaration_the_check_refuses_refuses_the_command(
     assert not (shop / ".dex" / "plans").exists() or not any(
         (shop / ".dex" / "plans").iterdir()
     )
+
+
+def test_a_build_in_its_own_schema_gets_references_to_the_built_parent(
+    shop: Path, capsys
+):
+    """#892: on a warehouse the sources and the build live in different schemas,
+    and the replica fold kept only a built foreign key's join to the raw table,
+    so no `references` was ever drafted off DuckDB. Here the build sits in its
+    own schema beside the sources, as it does on every warehouse."""
+
+    duckdb = pytest.importorskip("duckdb")
+    conn = duckdb.connect(str(shop / "shop.duckdb"))
+    conn.execute("create schema dbt_dev")
+    conn.execute(
+        "create table dbt_dev.stg_customers as select customer_id, region "
+        "from main.customers"
+    )
+    conn.execute(
+        "create table dbt_dev.stg_orders as select order_id, customer_id, status, "
+        "amount from main.raw_orders"
+    )
+    conn.execute(
+        "create table dbt_dev.fct_orders as select order_id, customer_id, amount "
+        "from dbt_dev.stg_orders where status <> 'cancelled'"
+    )
+    conn.close()
+    for argv in (
+        ["explore", "map", "--full"],
+        ["explore", "relationships", "--verify"],
+    ):
+        assert main([*argv, "--repo-root", str(shop)]) == 0, argv
+        capsys.readouterr()
+
+    envelope = _dex(shop, ["transform", "declare", "fct_orders"], capsys)
+    assert envelope["status"] == "ok", envelope
+    (proposed,) = envelope["data"]["proposed"]
+    customer = proposed["fields"]["columns"]["customer_id"]
+    assert customer["role"]["value"] == "foreign_key"
+    assert customer["references"]["value"] == "stg_customers.customer_id"
+    assert "dbt_dev.stg_customers" in customer["references"]["evidence"]

@@ -395,6 +395,92 @@ def test_a_clean_join_wins_over_an_orphaned_one_listed_first():
     assert column["references"]["value"] == "customers.id"
 
 
+def _staging_draft(cache: DexCache) -> dict:
+    """A staging model over a raw table, beside a staging model over the
+    customers that table's foreign key names."""
+
+    files = {
+        "models/staging/stg_payments.sql": (
+            "select payment_id, customer_id from {{ source('raw', 'payments') }}\n"
+        ),
+        "models/staging/stg_customers.sql": (
+            "select id from {{ source('raw', 'customers') }}\n"
+        ),
+    }
+    drafts, _ = draft(["stg_payments"], files, ["models"], cache, dialect="duckdb")
+    return drafts["stg_payments"]["drafted"]["columns"]["customer_id"]
+
+
+def _payments_cache(*, built: bool) -> DexCache:
+    """Raw sources in `raw` and the build in `dbt_dev`, as on every warehouse
+    (#892): the raw foreign key joins only the raw parent."""
+
+    def payments(identifier: str) -> Dataset:
+        return Dataset(
+            identifier=identifier,
+            columns=[
+                _key("payment_id"),
+                _col("customer_id", "integer", null_fraction=0.0),
+            ],
+        )
+
+    datasets = [
+        payments("warehouse.raw.payments"),
+        Dataset(identifier="warehouse.raw.customers", columns=[_key("id")]),
+    ]
+    relationships = [
+        Relationship(
+            from_dataset="warehouse.raw.payments",
+            from_columns=["customer_id"],
+            to_dataset="warehouse.raw.customers",
+            to_columns=["id"],
+            kind=RelationshipKind.INFERRED,
+            verified=True,
+            orphan_fraction=0.0,
+        )
+    ]
+    if built:
+        datasets += [
+            payments("warehouse.dbt_dev.stg_payments"),
+            Dataset(identifier="warehouse.dbt_dev.stg_customers", columns=[_key("id")]),
+        ]
+        relationships.append(
+            Relationship(
+                from_dataset="warehouse.dbt_dev.stg_payments",
+                from_columns=["customer_id"],
+                to_dataset="warehouse.dbt_dev.stg_customers",
+                to_columns=["id"],
+                kind=RelationshipKind.INFERRED,
+                verified=True,
+                orphan_fraction=0.0,
+            )
+        )
+    return DexCache(datasets=datasets, relationships=relationships)
+
+
+def test_a_built_staging_model_references_the_model_its_own_relation_joins():
+    # Found dogfooding #892: a staging model's column comes from a raw table,
+    # whose joins on a warehouse reach only the raw parent, so the draft
+    # proposed a foreign key with no `references`. The model's own built
+    # relation joins the staging model beside it, and that is the reference.
+    column = _staging_draft(_payments_cache(built=True))
+
+    assert column["role"]["value"] == "foreign_key"
+    assert column["references"]["value"] == "stg_customers.id"
+    assert (
+        "warehouse.dbt_dev.stg_payments.customer_id -> "
+        "warehouse.dbt_dev.stg_customers.id" in column["references"]["evidence"]
+    )
+
+
+def test_an_unbuilt_staging_model_keeps_the_raw_join_as_evidence():
+    column = _staging_draft(_payments_cache(built=False))
+
+    assert column["role"]["value"] == "foreign_key"
+    assert column["references"]["value"] == "customers.id"
+    assert "not a model of this project" in column["references"]["evidence"]
+
+
 # --- value domains ------------------------------------------------------------------
 
 

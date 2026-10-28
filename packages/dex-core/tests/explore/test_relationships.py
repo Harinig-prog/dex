@@ -588,6 +588,10 @@ def _mirror_world(dev_schema: str = "dbt_dev") -> list[Dataset]:
     ]
 
 
+def _edges(rels: list[Relationship]) -> set[tuple[str, str]]:
+    return {(r.from_dataset, r.to_dataset) for r in rels}
+
+
 def test_replica_dataset_duplicate_edges_are_folded():
     datasets = _mirror_world()
     rels = infer_relationships(datasets)
@@ -596,11 +600,13 @@ def test_replica_dataset_duplicate_edges_are_folded():
     kept, folded, mirrored = fold_replica_relationships(
         datasets, rels, frozenset({"dbt_dev"})
     )
-    assert folded == 3
-    assert len(kept) == 1
-    # The kept edge is the source-schema one, named by the dev_dataset config.
-    assert kept[0].from_dataset == "db.main.orders"
-    assert kept[0].to_dataset == "db.main.customers"
+    # The two cross-schema lookalikes go; each schema keeps its own join, since
+    # the dev one is the join a built model can declare (#892).
+    assert folded == 2
+    assert _edges(kept) == {
+        ("db.main.orders", "db.main.customers"),
+        ("db.dbt_dev.stg_orders", "db.dbt_dev.dim_customers"),
+    }
     assert mirrored == 2  # the two dbt_dev objects
 
 
@@ -608,10 +614,13 @@ def test_fold_detects_mirror_structurally_without_config():
     datasets = _mirror_world()
     rels = infer_relationships(datasets)
     kept, folded, mirrored = fold_replica_relationships(datasets, rels)
-    # No dev_schemas passed: structural mirror detection still collapses the
-    # duplicates (canonical chosen deterministically).
-    assert folded == 3
-    assert len(kept) == 1
+    # No dev_schemas passed: structural mirror detection still folds the
+    # cross-schema lookalikes.
+    assert folded == 2
+    assert _edges(kept) == {
+        ("db.main.orders", "db.main.customers"),
+        ("db.dbt_dev.stg_orders", "db.dbt_dev.dim_customers"),
+    }
     assert mirrored == 2
 
 
@@ -635,34 +644,154 @@ def test_fold_is_a_noop_without_a_mirror():
 
 def test_fold_matches_qualified_dev_dataset_config():
     """A BigQuery-style qualified dev_dataset (`project.dataset`) must still mark
-    the replica schema, so the source edge is kept as canonical."""
+    the replica schema, so the cross-schema lookalikes are folded."""
 
     datasets = _mirror_world()
     rels = infer_relationships(datasets)
     kept, folded, mirrored = fold_replica_relationships(
         datasets, rels, frozenset({"db.dbt_dev"})
     )
-    assert folded == 3
-    assert len(kept) == 1
-    assert kept[0].from_dataset == "db.main.orders"
-    assert kept[0].to_dataset == "db.main.customers"
+    assert folded == 2
+    assert _edges(kept) == {
+        ("db.main.orders", "db.main.customers"),
+        ("db.dbt_dev.stg_orders", "db.dbt_dev.dim_customers"),
+    }
     assert mirrored == 2
 
 
 def test_fold_matches_dev_schema_case_insensitively():
     """A lower-case configured dev_schema must match an upper-cased warehouse
-    schema (Snowflake/Redshift casing), keeping the source edge as canonical."""
+    schema (Snowflake/Redshift casing), so the cross-schema lookalikes fold."""
 
     datasets = _mirror_world(dev_schema="DBT_DEV")
     rels = infer_relationships(datasets)
     kept, folded, mirrored = fold_replica_relationships(
         datasets, rels, frozenset({"dbt_dev"})
     )
-    assert folded == 3
-    assert len(kept) == 1
-    assert kept[0].from_dataset == "db.main.orders"
-    assert kept[0].to_dataset == "db.main.customers"
+    assert folded == 2
+    assert _edges(kept) == {
+        ("db.main.orders", "db.main.customers"),
+        ("db.DBT_DEV.stg_orders", "db.DBT_DEV.dim_customers"),
+    }
     assert mirrored == 2
+
+
+def _built_world(raw: str = "shop", dev: str = "dex_dev") -> list[Dataset]:
+    """Raw sources in one schema and a dbt build in another, the shape of every
+    warehouse dogfood of #501: the mart has no raw twin, and its parent exists
+    as the raw table, the staging model over it and the dimension downstream."""
+
+    def customers(identifier: str) -> Dataset:
+        return _ds(
+            identifier,
+            [_col("customer_id", distinct=5, unique=True), _col("name", "VARCHAR")],
+            rows=5,
+        )
+
+    return [
+        customers(f"db.{raw}.customers"),
+        _ds(
+            f"db.{raw}.orders",
+            [
+                _col("order_id", distinct=9, unique=True),
+                _col("customer_id", distinct=4),
+            ],
+            rows=9,
+        ),
+        customers(f"db.{dev}.stg_customers"),
+        customers(f"db.{dev}.dim_customers"),
+        _ds(
+            f"db.{dev}.fct_customer_spend",
+            [
+                _col("order_id", distinct=9, unique=True),
+                _col("customer_id", distinct=4),
+                _col("cumulative_spend", "DOUBLE"),
+            ],
+            rows=9,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "dev", "configured"),
+    [("shop", "dex_dev", "dex_dev"), ("SHOP501", "DEX_501", "dex_501")],
+)
+def test_fold_keeps_a_built_foreign_key_joined_to_the_built_parent(
+    raw: str, dev: str, configured: str
+):
+    """#892: with sources and the build in different schemas, a built foreign
+    key used to keep only its join to the raw table, so no `references` could
+    be drafted on a warehouse. It keeps the built parents beside it now, and a
+    raw foreign key still keeps the raw parent."""
+
+    datasets = _built_world(raw, dev)
+    rels = infer_relationships(datasets)
+    kept, folded, _mirrored = fold_replica_relationships(
+        datasets, rels, frozenset({configured})
+    )
+    from_mart = {
+        r.to_dataset
+        for r in kept
+        if r.from_dataset == f"db.{dev}.fct_customer_spend"
+        and r.from_columns == ["customer_id"]
+    }
+    assert from_mart == {f"db.{dev}.stg_customers", f"db.{dev}.dim_customers"}
+    from_raw = {
+        r.to_dataset
+        for r in kept
+        if r.from_dataset == f"db.{raw}.orders" and r.from_columns == ["customer_id"]
+    }
+    assert from_raw == {f"db.{raw}.customers"}
+    # Nothing in the source schema points into the build: raw `orders` has its
+    # own parent, and raw `customers` is a copy of the built ones, not a child.
+    assert not [
+        r
+        for r in kept
+        if r.from_dataset.startswith(f"db.{raw}.")
+        and r.to_dataset.startswith(f"db.{dev}.")
+        and r.from_columns == ["customer_id"]
+    ]
+    assert folded > 0
+
+
+def test_fold_does_not_depend_on_which_schema_reads_as_the_source():
+    """With no dev schema configured, the mirror is detected structurally and
+    the schema with more tables is taken as canonical, which on a built project
+    is often the build. The result must not change with that choice."""
+
+    datasets = _built_world()
+    datasets.append(
+        _ds("db.dex_dev.rpt_spend", [_col("customer_id", distinct=4)], rows=4)
+    )
+    rels = infer_relationships(datasets)
+    kept, folded, _mirrored = fold_replica_relationships(datasets, rels)
+    assert folded > 0
+    from_mart = {
+        r.to_dataset
+        for r in kept
+        if r.from_dataset == "db.dex_dev.fct_customer_spend"
+        and r.from_columns == ["customer_id"]
+    }
+    assert from_mart == {"db.dex_dev.stg_customers", "db.dex_dev.dim_customers"}
+    assert ("db.shop.orders", "db.shop.customers") in _edges(kept)
+    assert ("db.shop.customers", "db.dex_dev.stg_customers") not in _edges(kept)
+
+
+def test_fold_keeps_a_cross_schema_join_with_no_same_schema_twin():
+    """A built foreign key whose parent was never built keeps its join to the
+    raw table: nothing nearer stands for it, so the evidence is not dropped."""
+
+    datasets = [
+        d
+        for d in _built_world()
+        if not d.identifier.endswith(("stg_customers", "dim_customers"))
+    ]
+    rels = infer_relationships(datasets)
+    kept, folded, _mirrored = fold_replica_relationships(
+        datasets, rels, frozenset({"dex_dev"})
+    )
+    assert ("db.dex_dev.fct_customer_spend", "db.shop.customers") in _edges(kept)
+    assert folded == 0
 
 
 def test_map_folds_mirrored_lineage_and_notes_it(tmp_path: Path, capsys):
@@ -686,8 +815,8 @@ def test_map_folds_mirrored_lineage_and_notes_it(tmp_path: Path, capsys):
         ["explore", "map", "--path", str(db), "--repo-root", str(repo)], capsys
     )
     assert any("mirror source lineage" in n for n in payload["data"]["notes"])
-    # One real foreign key survives instead of the inflated cross-schema fan-out.
-    assert payload["data"]["relationship_count"] <= 2
+    # Each schema's own join survives; the cross-schema lookalikes do not.
+    assert payload["data"]["relationship_count"] == 2
 
 
 def test_relationships_folds_mirrored_lineage_and_persists_folded_set(
@@ -714,21 +843,32 @@ def test_relationships_folds_mirrored_lineage_and_persists_folded_set(
     repo = tmp_path / "repo"
     repo.mkdir()
     payload = _run(
-        ["explore", "relationships", "--path", str(db), "--repo-root", str(repo)],
+        [
+            "explore",
+            "relationships",
+            "--path",
+            str(db),
+            "--repo-root",
+            str(repo),
+            "--verify",
+        ],
         capsys,
     )
     data = payload["data"]
     assert any("mirror source lineage" in n for n in data["notes"])
-    # One real foreign key survives instead of the inflated cross-schema fan-out.
-    assert len(data["relationships"]) == 1
+    # Each schema keeps its own join and the cross-schema lookalikes are
+    # folded, so the dev join a built model can declare is measured too (#892).
+    edges = {(r["from_dataset"], r["to_dataset"]): r for r in data["relationships"]}
+    assert set(edges) == {
+        ("mirror.main.orders", "mirror.main.customers"),
+        ("mirror.dbt_dev.stg_orders", "mirror.dbt_dev.dim_customers"),
+    }
+    built = edges[("mirror.dbt_dev.stg_orders", "mirror.dbt_dev.dim_customers")]
+    assert built["verified"] is True
+    assert built["orphan_fraction"] == 0.0
 
     cache = FilesystemStore(repo).load_cache()
-    assert len(cache.relationships) == 1
-    envelope_edge = data["relationships"][0]
-    assert (cache.relationships[0].from_dataset, cache.relationships[0].to_dataset) == (
-        envelope_edge["from_dataset"],
-        envelope_edge["to_dataset"],
-    )
+    assert {(r.from_dataset, r.to_dataset) for r in cache.relationships} == set(edges)
 
 
 # --- grain and data-quality notes ----------------------------------------------

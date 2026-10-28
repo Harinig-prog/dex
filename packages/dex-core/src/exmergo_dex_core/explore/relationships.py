@@ -394,8 +394,18 @@ def fold_replica_relationships(
     structurally mirrors another (the same layer-stripped entity and column set
     living in a second schema). With no replica in scope nothing is folded, so a
     single-dataset map is untouched. Within each lineage signature that a replica
-    edge participates in, the canonical (source-schema) edge is kept and the
-    duplicates are dropped.
+    edge participates in, each child keeps the edges to the parents nearest it
+    (:func:`_namespace_affinity`) and the cross-schema lookalikes are dropped,
+    including every edge between two tables of one entity in different schemas,
+    which are copies of each other rather than a child and its parent.
+
+    Per child rather than one edge per signature (#892): a built model's join to
+    the built parent beside it is the one a project can declare, since a
+    ``references`` renders ``ref()`` and no ``ref()`` reaches a raw table.
+    Collapsing the signature to its source-schema edge dropped every join inside
+    the dev schema, so on a warehouse a built foreign key only ever pointed at
+    the raw table. Parents tied on affinity are all kept (``stg_customers`` and
+    ``dim_customers`` beside a mart), as they are where nothing is folded.
     """
 
     def schema_of(identifier: str) -> str:
@@ -467,21 +477,30 @@ def fold_replica_relationships(
 
     kept: list[Relationship] = []
     folded = 0
-    for members in groups.values():
+    for sig, members in groups.items():
         if len(members) == 1 or not any(replica_endpoints(r) for r in members):
             kept.extend(members)
             continue
-        best = min(
-            members,
-            key=lambda r: (
-                replica_endpoints(r),
-                -(r.confidence or 0.0),
-                r.from_dataset,
-                r.to_dataset,
-            ),
-        )
-        kept.append(best)
-        folded += len(members) - 1
+        by_child: dict[str, list[Relationship]] = {}
+        for rel in members:
+            by_child.setdefault(rel.from_dataset, []).append(rel)
+        for child, edges in by_child.items():
+            if sig[0] == sig[2]:
+                # A table of the same entity in another schema is a copy of
+                # this one (raw `customers` and `stg_customers`), not a parent.
+                local = [
+                    r for r in edges if schema_of(r.to_dataset) == schema_of(child)
+                ]
+                folded += len(edges) - len(local)
+                edges = local
+                if not edges:
+                    continue
+            best = min(_namespace_affinity(child, r.to_dataset) for r in edges)
+            for rel in edges:
+                if _namespace_affinity(child, rel.to_dataset) == best:
+                    kept.append(rel)
+                else:
+                    folded += 1
     return kept, folded, mirrored_object_count
 
 

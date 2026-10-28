@@ -1249,6 +1249,18 @@ inferred join with one aggregate overlap probe (non-null foreign keys, orphan
 count) and adjusts its confidence; the result carries `verified` and
 `orphan_fraction`.
 
+When a dev or replica schema is in scope beside its sources (the connector's
+configured dev namespace, or a schema that mirrors another's entities and
+columns), inference finds every foreign key twice over: once inside each schema
+and once across them. Both commands keep each foreign key's join to the parent
+in its own schema and fold the same join to a parent of that entity in another
+schema, along with every cross-schema join between two tables of one entity
+(raw `customers` and the built `stg_customers` are copies, not a parent and its
+child). A built
+model's foreign key therefore keeps its join to the built parent beside it, which
+is the one a declaration can `ref()`, and keeps a join to the raw table only when
+nothing was built for that entity. The notes count what was folded.
+
 Exploration starts bare: by default the warehouse is observed as-is, and a dbt
 project in the repo earns only a discovery note. `explore profile`,
 `explore relationships`, and `explore map` accept `--use-project`, which folds

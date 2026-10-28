@@ -1135,6 +1135,17 @@ def _column_facts(
         reference = _verified_reference(
             cache, dataset, origin.column, files, model_paths, model=model
         )
+        if model is not None and not _reachable(reference, files, model_paths):
+            # A staging model's column comes from a raw table, whose joins on a
+            # warehouse reach only other raw tables (#892). Once the model is
+            # built, its own relation's joins reach the models beside it.
+            built = dataset_for(cache, model)
+            if built is not None and built is not dataset:
+                own = _verified_reference(
+                    cache, built, name, files, model_paths, model=model
+                )
+                if _reachable(own, files, model_paths):
+                    reference = own
         if reference is not None and reference[0] is not None:
             facts["role"] = {"value": "foreign_key", "evidence": reference[1]}
             facts["references"] = {"value": reference[0], "evidence": reference[1]}
@@ -1312,6 +1323,22 @@ def _verified_reference(
         )
         evidence += f" (also clean: {', '.join(others)})"
     return target, evidence
+
+
+def _reachable(
+    reference: tuple[str | None, str] | None,
+    files: Mapping[str, str],
+    model_paths: list[str],
+) -> bool:
+    """Whether a drafted reference names something ``ref()`` reaches: a model,
+    seed or snapshot of this project, rather than a raw table."""
+
+    if reference is None or reference[0] is None:
+        return False
+    parent = reference[0].rsplit(".", 1)[0]
+    return model_sql_path(
+        files, model_paths, parent
+    ) is not None or _is_seed_or_snapshot(files, model_paths, parent)
 
 
 def _project_name(
