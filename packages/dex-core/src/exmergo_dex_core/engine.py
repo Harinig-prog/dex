@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         ApplyResult,
         BuildResult,
         ClassificationResult,
+        DeclareResult,
         DepsResult,
         GroundingResult,
         InitResult,
@@ -1553,6 +1554,20 @@ class DexEngine:
         from .transform import commands as transform
 
         return transform.place(self, column, targets, expression, explain=explain)
+
+    def declare(
+        self,
+        models: list[str] | None = None,
+        *,
+        declarations: list[Any] | None = None,
+        limit: int | None = None,
+        intent: str | None = None,
+    ) -> DeclareResult:
+        from .transform import commands as transform
+
+        return transform.declare(
+            self, models, declarations=declarations, limit=limit, intent=intent
+        )
 
     def build(
         self,

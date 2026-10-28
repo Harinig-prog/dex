@@ -259,6 +259,25 @@ dex transform place <column>      -> where a derived column shared by several mo
                                      `per_target` and the reason is stated rather than the worse thing
                                      being done quietly. --explain returns the reasoning and stores no
                                      plan. Repo-only and free
+dex transform declare [<model>]   -> declarations for models that already exist, opt-in. One stored
+  [--edits-file <f>] [--limit N]     plan proposing, per selected model, only the measured facts its
+  [--intent "<text>"]                YAML does not state: the grain, a key or foreign_key role, a
+                                     references to a model/seed/snapshot of this project, and
+                                     semi_additive for a running total, each under data.proposed with
+                                     its evidence. Selector as `maintain verify` (names, repeatable,
+                                     comma-separated; none = every model), read from the repo alone.
+                                     A declared field is never proposed, so a second run after apply
+                                     is a no-op. Unit shape, NULL facts, PII and value domains stay
+                                     evidence in data.declarations.<model>.drafted; intent stays in
+                                     missing unless the payload's declarations supply it (they win
+                                     field by field; edits are refused). Every model not proposed is
+                                     in data.skipped with a reason (not_a_model, python_model,
+                                     versioned, sql_unreadable, unprofiled_inputs + the profile
+                                     command, nothing_drafted, complete, not_writable). Capped at 25
+                                     proposals (--limit only narrows); skipped models do not count,
+                                     the rest are data.elided_count and a note. Nothing to propose
+                                     stores no plan (plan_id null). Rendered, parse-gated and stored as
+                                     a transform plan declaration. Repo-and-cache only and free
 dex transform build --target dev  -> cost preflight FIRST; runs only with --confirm and a budget;
              [--verify]              auto-runs dbt deps when packages are declared but not installed.
              [--for-plan <id>]       --verify sweeps the nodes this build ran for correctness and
@@ -459,7 +478,11 @@ schemas, the metric-input check and dbt's parse of a throwaway copy is added to 
 same plan; in one without, nothing is added and the object is ready to pass to
 `semantic plan --definitions-file`. The parse is never skipped for a derivation,
 whatever `--no-parse` says. A command that takes no declarations refuses a payload
-carrying them rather than dropping them. The full shape, the refusals and
+carrying them rather than dropping them. `transform declare [<model>...]` takes the
+same payload for models that already exist: it proposes only the measured facts
+each selected model does not yet declare, lays the supplied `declarations` over
+them field by field, and stores the lot as one capped plan, naming every model it
+skipped and why. The full shape, the refusals and
 what each field renders into:
 [`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).
 

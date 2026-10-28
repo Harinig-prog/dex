@@ -293,6 +293,108 @@ def test_a_verified_join_with_orphans_is_withheld_as_a_reference():
     assert "100.0% of its values unmatched" in column["references"]["withheld"]
 
 
+def _edge(to: str, column: str, orphans: float | None = 0.0) -> Relationship:
+    return Relationship(
+        from_dataset=ORDERS.identifier,
+        from_columns=["customer_id"],
+        to_dataset=to,
+        to_columns=[column],
+        kind=RelationshipKind.INFERRED,
+        verified=True,
+        orphan_fraction=orphans,
+    )
+
+
+def _project_draft(cache: DexCache, model: str = "fct") -> dict:
+    """``model`` in ``models/marts`` reading stg_orders, beside a dimension and a
+    staging model over the same customers."""
+
+    files = {
+        f"models/marts/{model}.sql": (
+            "select order_id, customer_id from {{ ref('stg_orders') }}\n"
+        ),
+        "models/marts/dim_customers.sql": "select id from {{ ref('stg_customers') }}\n",
+        "models/staging/stg_customers.sql": (
+            "select id from {{ source('raw', 'customers') }}\n"
+        ),
+    }
+    drafts, _ = draft([model], files, ["models"], cache, dialect="duckdb")
+    return drafts[model]["drafted"]["columns"]["customer_id"]
+
+
+def test_a_reference_prefers_a_project_model_and_the_one_nearest_the_model():
+    # Found dogfooding #501: once the project is built, a column joins cleanly to
+    # the raw table, its staging model and the dimension. The first edge listed
+    # used to win, which proposed `references` to a raw table no `ref()` reaches.
+    cache = CACHE.model_copy(deep=True)
+    cache.datasets += [
+        Dataset(identifier="warehouse.main.stg_customers", columns=[_key("id")]),
+        Dataset(identifier="warehouse.main.dim_customers", columns=[_key("id")]),
+    ]
+    cache.relationships += [
+        _edge("warehouse.main.stg_customers", "id"),
+        _edge("warehouse.main.dim_customers", "id"),
+    ]
+
+    column = _project_draft(cache)
+
+    assert column["references"]["value"] == "dim_customers.id"
+    assert "also clean: customers, stg_customers" in column["references"]["evidence"]
+
+
+def test_a_reference_skips_a_parent_whose_column_is_not_unique_and_the_model_itself():
+    cache = CACHE.model_copy(deep=True)
+    cache.relationships = [
+        _edge("warehouse.main.fct", "customer_id"),
+        _edge("warehouse.main.stg_items", "order_id"),
+    ]
+    cache.datasets[2] = Dataset(
+        identifier="warehouse.main.stg_items",
+        columns=[_col("order_id", "integer", is_unique=False)],
+    )
+
+    column = _project_draft(cache)
+
+    assert "role" not in column
+    assert column["references"]["value"] is None
+    assert "not unique in warehouse.main.stg_items" in column["references"]["withheld"]
+
+
+def test_a_reference_finds_the_project_model_a_folding_warehouse_reports_in_capitals():
+    # Found dogfooding #501 on Snowflake: `DEX_501.STG_CUSTOMERS` is the model
+    # the project writes as `stg_customers.sql`, and an exact-case lookup took it
+    # for a relation no `ref()` reaches.
+    cache = CACHE.model_copy(deep=True)
+    cache.datasets.append(
+        Dataset(
+            identifier="DB.DEX_501.STG_CUSTOMERS",
+            columns=[_key("ID")],
+        )
+    )
+    cache.relationships = [_edge("DB.DEX_501.STG_CUSTOMERS", "ID")]
+
+    column = _project_draft(cache)
+
+    assert column["references"]["value"] == "stg_customers.id"
+    assert "not a model of this project" not in column["references"]["evidence"]
+
+
+def test_a_clean_join_wins_over_an_orphaned_one_listed_first():
+    cache = CACHE.model_copy(deep=True)
+    cache.datasets.append(
+        Dataset(identifier="warehouse.main.dim_customers", columns=[_key("id")])
+    )
+    cache.relationships = [
+        _edge("warehouse.main.dim_customers", "id", orphans=0.2),
+        _edge("warehouse.main.customers", "id"),
+    ]
+
+    column = _project_draft(cache)
+
+    assert column["role"]["value"] == "foreign_key"
+    assert column["references"]["value"] == "customers.id"
+
+
 # --- value domains ------------------------------------------------------------------
 
 
