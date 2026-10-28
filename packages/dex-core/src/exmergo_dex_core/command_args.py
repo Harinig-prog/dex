@@ -373,7 +373,7 @@ def phase_handshake(
     estimate: float,
     *,
     phase: str,
-    hint: Callable[[float, str, int], str],
+    hint: Callable[[float, str, int, bool], str],
     per_table_key: str | None = None,
     extra: dict[str, Any] | None = None,
     notes: list[str] | None = None,
@@ -395,9 +395,13 @@ def phase_handshake(
     would then pay for the same scan twice. ``None`` is the ordinary outcome,
     and it means the confirmed budget already covers the phase.
 
-    ``hint`` is handed the estimate, the paradigm's name, and the whole-command
-    budget a re-run needs, and writes the sentence saying what was found and
-    what to re-run. ``skip`` is the caller's own "nothing to price" test, which
+    ``hint`` is handed the estimate, the paradigm's name, the whole-command
+    budget a re-run needs, and whether the command was confirmed, and writes
+    the sentence saying what was found and what to re-run. An unconfirmed
+    command reaches a phase checkpoint only when its earlier phases spent
+    nothing, so there is no confirmed budget to be beyond and the re-run reuses
+    the cached profiles (:func:`_phase_cost` and :func:`_rerun_profiles`).
+    ``skip`` is the caller's own "nothing to price" test, which
     differs per phase and is not this function's to guess.
     """
 
@@ -424,7 +428,10 @@ def phase_handshake(
                 "phase": phase,
                 **(extra or {}),
                 "hint": hint(
-                    estimate, gate.paradigm.value, math.ceil(exc.cost.estimate)
+                    estimate,
+                    gate.paradigm.value,
+                    math.ceil(exc.cost.estimate),
+                    gate.confirmed,
                 ),
             }
         )
@@ -448,6 +455,24 @@ def phase_handshake(
             data["notes"] = [*data.get("notes", []), *extra_notes]
         return ConfirmationRequest(cost=exc.cost, data=data)
     return None
+
+
+def _phase_cost(cost: float, paradigm: str, confirmed: bool) -> str:
+    """The estimate as a phase hint states it: past the confirmed budget on a
+    confirmed command, or simply unconfirmed on one that was not."""
+
+    if confirmed:
+        return f"{cost:.0f} {paradigm} beyond what remains of the confirmed budget"
+    return f"{cost:.0f} {paradigm}, and this command was not confirmed"
+
+
+def _rerun_profiles(confirmed: bool) -> str:
+    """What a re-run does with the profiles: a confirmed run spent its budget on
+    them and profiles again, an unconfirmed one found them fresh in the cache."""
+
+    if confirmed:
+        return "a re-run re-profiles first"
+    return "the cached profiles are reused"
 
 
 def verify_handshake(
@@ -476,14 +501,13 @@ def verify_handshake(
         per_table_key="(join overlap probes)",
         extra={"candidate_count": candidate_count, "object_count": object_count},
         skip=candidate_count == 0,
-        hint=lambda cost, paradigm, budget: (
+        hint=lambda cost, paradigm, budget, confirmed: (
             f"found {candidate_count} candidate relationship(s) across "
             f"{object_count} object(s); verifying them all is estimated "
-            f"at {cost:.0f} {paradigm} beyond what "
-            "remains of the confirmed budget. Profiles and unverified "
-            "relationships are already saved to the exploration cache; "
-            f"re-run the same command with --confirm --budget {budget} "
-            "to profile and verify in one pass (a re-run re-profiles first)"
+            f"at {_phase_cost(cost, paradigm, confirmed)}. Profiles and "
+            "unverified relationships are already saved to the exploration "
+            f"cache; re-run the same command with --confirm --budget {budget} "
+            f"to profile and verify in one pass ({_rerun_profiles(confirmed)})"
         ),
     )
 
@@ -523,16 +547,14 @@ def overlap_handshake(
             "elided": elided,
         },
         skip=candidate_count == 0,
-        hint=lambda cost, paradigm, budget: (
+        hint=lambda cost, paradigm, budget, confirmed: (
             f"found {candidate_count} unmatched key-shaped column "
             f"pair(s) across {object_count} object(s) to probe for "
             f"value overlap; probing them all is estimated at "
-            f"{cost:.0f} {paradigm} beyond what "
-            "remains of the confirmed budget. Relationships found so "
-            "far are already saved to the exploration cache; re-run "
+            f"{_phase_cost(cost, paradigm, confirmed)}. Relationships found "
+            "so far are already saved to the exploration cache; re-run "
             f"the same command with --confirm --budget {budget} to "
-            "profile, infer, and sweep in one pass (a re-run re-profiles "
-            "first)"
+            f"profile, infer, and sweep in one pass ({_rerun_profiles(confirmed)})"
         ),
     )
 
@@ -557,16 +579,14 @@ def cumulative_handshake(
         per_table_key="(cumulative-measure probes)",
         extra={"candidate_count": candidate_count, "object_count": object_count},
         skip=candidate_count == 0,
-        hint=lambda cost, paradigm, budget: (
+        hint=lambda cost, paradigm, budget, confirmed: (
             f"found {candidate_count} entity/temporal candidate(s) "
             f"across {object_count} object(s); checking them all for "
-            f"cumulative measures is estimated at {cost:.0f} "
-            f"{paradigm} beyond what remains of the "
-            "confirmed budget. Profiles are already saved to the "
-            "exploration cache; re-run the same command with "
-            f"--confirm --budget {budget} to "
-            "profile and check in one pass (a re-run re-profiles "
-            "first)"
+            "cumulative measures is estimated at "
+            f"{_phase_cost(cost, paradigm, confirmed)}. Profiles are already "
+            "saved to the exploration cache; re-run the same command with "
+            f"--confirm --budget {budget} to profile and check in one pass "
+            f"({_rerun_profiles(confirmed)})"
         ),
     )
 
@@ -591,11 +611,10 @@ def sample_handshake(
         estimate,
         phase="sample",
         notes=notes,
-        hint=lambda cost, paradigm, budget: (
+        hint=lambda cost, paradigm, budget, confirmed: (
             "the profile this command needed is done and saved; the "
-            f"sample scan is estimated at {cost:.0f} "
-            f"{paradigm} beyond what remains of the confirmed "
-            f"budget. Re-run with --confirm --budget {budget}; "
+            f"sample scan is estimated at {_phase_cost(cost, paradigm, confirmed)}. "
+            f"Re-run with --confirm --budget {budget}; "
             "the cached profile is reused, so the re-run pays for the "
             "sample alone"
         ),

@@ -927,6 +927,9 @@ def test_unconfirmed_verify_over_a_fresh_cache_checkpoints_at_the_phase(
     assert envelope.data["phase"] == "verify"
     assert envelope.data["per_table_bytes"] == {"(join overlap probes)": 20 * MB}
     assert "--budget" in envelope.data["hint"]
+    # Nothing was confirmed, and the re-run reuses the fresh profiles (#906).
+    assert "confirmed budget" not in envelope.data["hint"]
+    assert "re-profiles first" not in envelope.data["hint"]
     assert envelope.cost.estimate == 20 * MB
     assert not _probe_executed(fk_bq_client)
 

@@ -513,7 +513,7 @@ def _facts_handshake(adapter: Adapter):
                 "the build is complete and its spend is settled; this estimate "
                 "buys only the checks of what its models declare"
             ],
-            hint=lambda cost, unit, budget: (
+            hint=lambda cost, unit, budget, _confirmed: (
                 f"{statement_count} aggregate statement(s) check what this build's "
                 f"models declare, estimated at {cost:.0f} {unit} beyond what remains "
                 "of the confirmed budget. The build itself is done and billed; "
@@ -560,7 +560,7 @@ def _count_handshake(adapter: Adapter):
                 "the build is complete and its spend is settled; this estimate "
                 "buys only the row counts that judge it"
             ],
-            hint=lambda cost, unit, budget: (
+            hint=lambda cost, unit, budget, _confirmed: (
                 f"{relation_count} relation(s) this build wrote have no row "
                 "count the warehouse maintains, and counting them is a scan "
                 f"estimated at {cost:.0f} {unit} beyond what remains of the "
