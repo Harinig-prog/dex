@@ -701,7 +701,7 @@ def test_a_source_in_another_database_names_it(connector):
             "tables": [{"name": "CUSTOMER"}],
         }
     ]
-    model = next(e for e in edits if e.path.endswith("stg_CUSTOMER.sql"))
+    model = next(e for e in edits if e.path.endswith("stg_customer.sql"))
     assert "source('TPCH_SF1', 'CUSTOMER')" in model.new_content
 
 
